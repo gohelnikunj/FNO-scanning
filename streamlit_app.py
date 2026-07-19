@@ -245,10 +245,10 @@ st.markdown(
     }
 
     /* Stock name badge — transparent background, yellow border, neon blue text */
-    .name-badge {
+    .stApp .name-badge {
         display: inline-block;
-        background-color: transparent;
-        color: #00e5ff;
+        background-color: transparent !important;
+        color: #00e5ff !important;
         font-weight: 800;
         padding: 4px 10px;
         border-radius: 6px;

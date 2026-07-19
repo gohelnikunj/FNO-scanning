@@ -244,17 +244,16 @@ st.markdown(
         white-space: nowrap;
     }
 
-    /* Stock name badge — white box, bright yellow text, sized to the text */
+    /* Stock name badge — transparent background, yellow border, neon blue text */
     .name-badge {
         display: inline-block;
-        background-color: #ffffff;
-        color: #eab300;
+        background-color: transparent;
+        color: #00e5ff;
         font-weight: 800;
         padding: 4px 10px;
         border-radius: 6px;
         font-size: 13.5px;
         white-space: nowrap;
-        text-shadow: 0 0 1px rgba(0,0,0,0.15);
         border: 1px solid #d9a63d;
     }
 

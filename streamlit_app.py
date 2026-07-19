@@ -352,7 +352,7 @@ else:
             if "note" in s:
                 st.markdown(f"<div style='color:#8a94a6;font-size:11px;margin-top:2px;'>ⓘ {s['note']}</div>", unsafe_allow_html=True)
 
-            with st.expander("📋 Full technicals (H / GMMA / WT / STCR / ADX / DI / RSI / SF)"):
+            with st.expander("📋 Full technicals (H / GMMA / WT / STCR / ADX / DI / RSI / SF)", expanded=True):
                 st.markdown(render_pine_table(tech), unsafe_allow_html=True)
 
 st.divider()

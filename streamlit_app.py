@@ -22,6 +22,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import yfinance as yf
+from datetime import datetime
 
 import indicators as ind
 
@@ -98,17 +99,26 @@ def fetch_ohlcv(ticker: str, interval: str, period: str):
 
 @st.cache_data(ttl=300, show_spinner=False)
 def compute_pine_table(ticker: str):
-    """Returns dict: {'Day': {...}, '1H': {...}, '5M': {...}} using indicators.batch()"""
+    """
+    Returns {'tech': {'Day':{...},'1H':{...},'5M':{...}}, 'fetched_at': datetime, 'ok': bool}
+    'fetched_at' only changes when this function actually re-runs (cache miss) —
+    that's what makes it a true "last updated" time, not just "page opened" time.
+    'ok' is False if any timeframe failed to fetch, so a stale/broken stock is visible.
+    """
     tf_specs = {
         "Day": ("1d", "1y", False),
         "1H":  ("1h", "1mo", True),
         "5M":  ("5m", "5d", True),
     }
-    out = {}
+    tech = {}
+    ok = True
     for label, (interval, period, intraday) in tf_specs.items():
         df = fetch_ohlcv(ticker, interval, period)
-        out[label] = ind.batch(df, intraday=intraday) if df is not None else None
-    return out
+        result = ind.batch(df, intraday=intraday) if df is not None else None
+        tech[label] = result
+        if result is None:
+            ok = False
+    return {"tech": tech, "fetched_at": datetime.now(), "ok": ok}
 
 
 # ─────────────────────────────────────────────────────────────
@@ -129,11 +139,11 @@ def render_pine_table(tech: dict) -> str:
     # rather than columns collapsing under each other.
     html = """
     <div style='overflow-x:auto;-webkit-overflow-scrolling:touch;border-radius:8px;'>
-    <table style='width:100%;min-width:520px;border-collapse:collapse;font-family:"JetBrains Mono",monospace;font-size:12.5px;white-space:nowrap;'>
+    <table style='border-collapse:collapse;font-family:"JetBrains Mono",monospace;font-size:11.5px;white-space:nowrap;width:auto;'>
     <tr>
     """
     for c, col_color in zip(cols, header_colors):
-        html += f"<th style='background:{header_bg};color:{col_color};padding:6px 8px;text-align:center;border:1px solid #1e3048;'>{c}</th>"
+        html += f"<th style='background:{header_bg};color:{col_color};padding:4px 7px;text-align:center;border:1px solid #1e3048;'>{c}</th>"
     html += "</tr>"
 
     for tf_label in ["Day", "1H", "5M"]:
@@ -141,30 +151,30 @@ def render_pine_table(tech: dict) -> str:
         bg = TF_BG_COLOR[tf_label]
         row_color = TF_ROW_COLOR[tf_label]
         html += f"<tr style='background:{bg};'>"
-        html += f"<td style='padding:6px 8px;text-align:center;color:{row_color};font-weight:700;border:1px solid #1e3048;'>{tf_label}</td>"
+        html += f"<td style='padding:4px 7px;text-align:center;color:{row_color};font-weight:700;border:1px solid #1e3048;'>{tf_label}</td>"
 
         if t is None:
-            html += f"<td colspan='7' style='padding:6px 8px;text-align:center;color:#c9d1de;border:1px solid #1e3048;'>Not enough data</td></tr>"
+            html += f"<td colspan='7' style='padding:4px 7px;text-align:center;color:#c9d1de;border:1px solid #1e3048;'>Not enough data</td></tr>"
             continue
 
         # H
-        html += f"<td style='padding:6px 8px;text-align:center;color:{ind.hc_col(t['hc'])};border:1px solid #1e3048;'>{ind.DOT}</td>"
+        html += f"<td style='padding:4px 7px;text-align:center;color:{ind.hc_col(t['hc'])};border:1px solid #1e3048;'>{ind.DOT}</td>"
         # GMMA
-        html += f"<td style='padding:6px 8px;text-align:center;color:{ind.dir_col(t['gmma_dir'])};border:1px solid #1e3048;'>{ind.gmma_txt(t['gmma_dir'], t['gmma_bars'])}</td>"
+        html += f"<td style='padding:4px 7px;text-align:center;color:{ind.dir_col(t['gmma_dir'])};border:1px solid #1e3048;'>{ind.gmma_txt(t['gmma_dir'], t['gmma_bars'])}</td>"
         # WT
-        html += f"<td style='padding:6px 8px;text-align:center;color:{ind.dir_col(t['wt_dir'])};border:1px solid #1e3048;'>{ind.wt_tri_txt(t['wt_dir'], t['wt_bars'], t['wt_cval'], t['wt_ob'], t['wt_os'])}</td>"
+        html += f"<td style='padding:4px 7px;text-align:center;color:{ind.dir_col(t['wt_dir'])};border:1px solid #1e3048;'>{ind.wt_tri_txt(t['wt_dir'], t['wt_bars'], t['wt_cval'], t['wt_ob'], t['wt_os'])}</td>"
         # STCR
-        html += f"<td style='padding:6px 8px;text-align:center;color:{ind.dir_col(t['stcr_dir'])};border:1px solid #1e3048;'>{ind.stcr_tri_txt(t['stcr_dir'], t['stcr_bars'], t['stcr_kv'])}</td>"
+        html += f"<td style='padding:4px 7px;text-align:center;color:{ind.dir_col(t['stcr_dir'])};border:1px solid #1e3048;'>{ind.stcr_tri_txt(t['stcr_dir'], t['stcr_bars'], t['stcr_kv'])}</td>"
         # ADX/DI combined cell (two values, two colors)
         adx_txt = ind.adx_val_txt(t["adx"])
         di_txt = ind.di_val_txt(t["dip"], t["dim"])
         di_c = ind.di_col(t["dip"], t["dim"])
-        html += f"<td style='padding:6px 8px;text-align:center;border:1px solid #1e3048;'><span style='color:#f1f4f8'>{adx_txt}</span> / <span style='color:{di_c}'>{di_txt}</span></td>"
+        html += f"<td style='padding:4px 7px;text-align:center;border:1px solid #1e3048;'><span style='color:#f1f4f8'>{adx_txt}</span> / <span style='color:{di_c}'>{di_txt}</span></td>"
         # RSI (value + candles since crossing 60/40, matching the other columns' style)
         rsi_txt = ind.rsi_val_txt_with_bars(t["rsi"], t.get("rsi_bars_60"), t.get("rsi_bars_40"))
-        html += f"<td style='padding:6px 8px;text-align:center;color:{ind.rsi_col(t['rsi'])};border:1px solid #1e3048;'>{rsi_txt}</td>"
+        html += f"<td style='padding:4px 7px;text-align:center;color:{ind.rsi_col(t['rsi'])};border:1px solid #1e3048;'>{rsi_txt}</td>"
         # SF
-        html += f"<td style='padding:6px 8px;text-align:center;color:{ind.sf_col(t['sf'])};font-weight:700;border:1px solid #1e3048;'>{ind.sf_txt(t['sf'])}</td>"
+        html += f"<td style='padding:4px 7px;text-align:center;color:{ind.sf_col(t['sf'])};font-weight:700;border:1px solid #1e3048;'>{ind.sf_txt(t['sf'])}</td>"
         html += "</tr>"
 
     html += "</table></div>"
@@ -234,25 +244,47 @@ st.markdown(
         white-space: nowrap;
     }
 
-    /* Stock header row — flexbox so it never stacks, even on mobile */
+    /* Stock name badge — white box, bright yellow text, sized to the text */
+    .name-badge {
+        display: inline-block;
+        background-color: #ffffff;
+        color: #eab300;
+        font-weight: 800;
+        padding: 4px 10px;
+        border-radius: 6px;
+        font-size: 13.5px;
+        white-space: nowrap;
+        text-shadow: 0 0 1px rgba(0,0,0,0.15);
+        border: 1px solid #d9a63d;
+    }
+
+    /* Last-updated / status badge, sized to its own text */
+    .updated-badge {
+        display: inline-block;
+        padding: 4px 10px;
+        border-radius: 6px;
+        font-family: 'JetBrains Mono', monospace;
+        font-size: 11px;
+        white-space: nowrap;
+        font-weight: 600;
+    }
+    .updated-ok   { background-color: #11221a; color: #2fd88a; border: 1px solid #1e4a34; }
+    .updated-fail { background-color: #2a1414; color: #ff5c6a; border: 1px solid #4a1e1e; }
+
+    /* Stock header row — flexbox so name badge + updated badge never stack, even on mobile */
     .stock-row {
         display: flex;
         flex-wrap: nowrap;
         align-items: center;
         justify-content: space-between;
-        gap: 10px;
+        gap: 8px;
         width: 100%;
     }
-    .stock-row .name-block { flex: 1 1 auto; min-width: 0; }
-    .stock-row .name-block .stock-name {
-        font-weight: 700; color: #ffffff; font-size: 14.5px;
-        overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display:block;
-    }
-    .stock-row .name-block .stock-sector { color: #8a94a6; font-size: 11.5px; }
-    .stock-row .tier-badge { flex: 0 0 auto; font-weight: 700; font-size: 12px; white-space: nowrap; }
+    .stock-sector { color: #8a94a6; font-size: 11.5px; }
 
     @media (max-width: 480px) {
-        .stock-row .name-block .stock-name { font-size: 13px; }
+        .name-badge { font-size: 12px; padding: 3px 8px; }
+        .updated-badge { font-size: 10px; padding: 3px 7px; }
         .ticker-chip { font-size: 10.5px; padding: 2px 6px; }
     }
     </style>
@@ -303,8 +335,8 @@ else:
     progress = st.progress(0.0, text="Fetching data…")
     enriched = []
     for i, s in enumerate(filtered):
-        tech = compute_pine_table(s["ticker"])
-        enriched.append({"stock": s, "tech": tech})
+        result = compute_pine_table(s["ticker"])
+        enriched.append({"stock": s, "tech": result["tech"], "fetched_at": result["fetched_at"], "ok": result["ok"]})
         progress.progress((i + 1) / len(filtered), text=f"Loaded {s['name']}")
     progress.empty()
 
@@ -328,32 +360,44 @@ else:
             row["_score"] = score
         enriched.sort(key=lambda r: (not r["_match"], -r["_score"]))
 
-    for row in enriched:
-        s, tech = row["stock"], row["tech"]
-        with st.container(border=True):
-            tier_color = "#2fd88a" if s["tier"] == 1 else "#d9a63d"
-            match_badge = ""
-            if filter_choice != "None" and row.get("_match"):
-                match_badge = "<span style='background:#d9a63d;color:#1a1408;padding:2px 8px;border-radius:5px;font-size:11px;font-weight:700;margin-left:8px;'>MATCH</span>"
+    # Two stocks side by side (Streamlit naturally stacks these to one
+    # column on narrow mobile screens, since two full tables truly can't
+    # fit legibly on a phone width).
+    cols_per_row = 2
+    for row_start in range(0, len(enriched), cols_per_row):
+        pair = enriched[row_start: row_start + cols_per_row]
+        grid = st.columns(cols_per_row)
+        for col, row in zip(grid, pair):
+            s, tech = row["stock"], row["tech"]
+            with col:
+                with st.container(border=True):
+                    match_badge = ""
+                    if filter_choice != "None" and row.get("_match"):
+                        match_badge = "<span style='background:#d9a63d;color:#1a1408;padding:2px 8px;border-radius:5px;font-size:11px;font-weight:700;margin-left:8px;'>MATCH</span>"
 
-            st.markdown(
-                f"""
-                <div class='stock-row'>
-                    <div class='name-block'>
-                        <span class='stock-name'>{s['name']}{match_badge}</span>
-                        <span class='stock-sector'>{s['sector']}</span>
-                    </div>
-                    <span class='tier-badge' style='color:{tier_color}'>TIER {s['tier']}</span>
-                    <span class='ticker-chip'>{s['ticker']}</span>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            if "note" in s:
-                st.markdown(f"<div style='color:#8a94a6;font-size:11px;margin-top:2px;'>ⓘ {s['note']}</div>", unsafe_allow_html=True)
+                    if row["ok"]:
+                        updated_html = f"<span class='updated-badge updated-ok'>✓ Updated {row['fetched_at'].strftime('%H:%M:%S')}</span>"
+                    else:
+                        updated_html = "<span class='updated-badge updated-fail'>⚠ Refresh failed</span>"
 
-            with st.expander("📋 Full technicals (H / GMMA / WT / STCR / ADX / DI / RSI / SF)", expanded=True):
-                st.markdown(render_pine_table(tech), unsafe_allow_html=True)
+                    st.markdown(
+                        f"""
+                        <div class='stock-row'>
+                            <span class='name-badge'>{s['name']}{match_badge}</span>
+                            {updated_html}
+                        </div>
+                        <div style='margin-top:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;'>
+                            <span class='stock-sector'>{s['sector']}</span>
+                            <span class='ticker-chip'>{s['ticker']}</span>
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+                    if "note" in s:
+                        st.markdown(f"<div style='color:#8a94a6;font-size:11px;margin-top:2px;'>ⓘ {s['note']}</div>", unsafe_allow_html=True)
+
+                    st.markdown("<div style='margin-top:8px;'></div>", unsafe_allow_html=True)
+                    st.markdown(render_pine_table(tech), unsafe_allow_html=True)
 
 st.divider()
 st.caption(
@@ -363,5 +407,7 @@ st.caption(
     "dominant direction), RSI (value + candles since crossing 60/40, green "
     ">60 / red <40), SF (4-factor BUY/SELL/NEU). Data delayed ~15-20 min via "
     "Yahoo Finance — free tools trade timeliness for zero cost. For "
-    "real-time, use your TradingView Pine Script indicator."
+    "real-time, use your TradingView Pine Script indicator. A stock showing "
+    "'⚠ Refresh failed' means Yahoo Finance didn't return data for it on the "
+    "last fetch — click '🔄 Refresh now' to retry."
 )

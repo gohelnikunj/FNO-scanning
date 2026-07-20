@@ -2,11 +2,19 @@
 F&O Liquidity + Full Technicals Dashboard
 -------------------------------------------
 100% free — no broker account, no API key, no monthly cost.
-Data source: Yahoo Finance (via the yfinance library), which is free but
-delayed roughly 15-20 minutes for Indian (NSE) symbols.
 
-The technicals panel below each stock reproduces a trimmed version of your
-Pine Script's table:
+ARCHITECTURE (updated): this app no longer calls Yahoo Finance directly.
+A separate script (update_data.py) runs on a schedule via GitHub Actions —
+on GitHub's own servers, independent of anyone having this page open — and
+writes results to data/latest.json. This app just reads that file. That
+means the data stays fresh even if nobody has the dashboard open for hours,
+which a browser-tab-only auto-refresh could never guarantee.
+
+IMPORTANT — one-time setup: set GITHUB_RAW_URL below to your own repo's
+raw.githubusercontent.com URL for data/latest.json (see SETUP_GUIDE.md).
+
+The technicals panel below each stock shows a trimmed version of the Pine
+Script's table:
     TF | H | GMMA | WT | ADX | DI | RSI
 for Day / 1H / 5M, using the same indicator logic (see indicators.py).
 (STCR and SF 4-Factor were removed by request to reduce computation load.)
@@ -14,21 +22,26 @@ for Day / 1H / 5M, using the same indicator logic (see indicators.py).
 HOW TO RUN LOCALLY (optional, for testing on your own computer):
     pip install -r requirements.txt
     streamlit run streamlit_app.py
-
-HOW TO DEPLOY FOR FREE (no local computer needed):
-    See SETUP_GUIDE.md in this same folder for step-by-step instructions.
 """
 
 import time
 import re
 import numpy as np
 import pandas as pd
+import requests
 import streamlit as st
-import yfinance as yf
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from streamlit_autorefresh import st_autorefresh
 
 import indicators as ind
+from stock_list import STOCKS
+
+# ─────────────────────────────────────────────────────────────
+#  ⚠ ONE-TIME SETUP — replace with YOUR GitHub username/repo
+# ─────────────────────────────────────────────────────────────
+GITHUB_RAW_URL = "https://raw.githubusercontent.com/YOUR_USERNAME/fno-dashboard/main/data/latest.json"
+
+IST = timezone(timedelta(hours=5, minutes=30))
 
 # ─────────────────────────────────────────────────────────────
 #  PAGE CONFIG
@@ -40,114 +53,39 @@ st.set_page_config(
 )
 
 # ─────────────────────────────────────────────────────────────
-#  STOCK UNIVERSE  (name -> Yahoo Finance ticker, sector, tier)
-#  Edit this list freely to add/remove stocks.
+#  STOCK UNIVERSE — imported from stock_list.py (shared with update_data.py)
 # ─────────────────────────────────────────────────────────────
-STOCKS = [
-    {"name": "Reliance Industries",     "ticker": "RELIANCE.NS",   "sector": "Energy",                "tier": 1},
-    {"name": "HDFC Bank",               "ticker": "HDFCBANK.NS",   "sector": "Banking & Financials",   "tier": 1},
-    {"name": "ICICI Bank",              "ticker": "ICICIBANK.NS",  "sector": "Banking & Financials",   "tier": 1},
-    {"name": "State Bank of India",     "ticker": "SBIN.NS",       "sector": "Banking & Financials",   "tier": 1},
-    {"name": "Axis Bank",               "ticker": "AXISBANK.NS",   "sector": "Banking & Financials",   "tier": 1},
-    {"name": "Kotak Mahindra Bank",     "ticker": "KOTAKBANK.NS",  "sector": "Banking & Financials",   "tier": 2},
-    {"name": "Bajaj Finance",           "ticker": "BAJFINANCE.NS", "sector": "Banking & Financials",   "tier": 1},
-    {"name": "Bajaj Finserv",           "ticker": "BAJAJFINSV.NS", "sector": "Banking & Financials",   "tier": 2},
-    {"name": "IndusInd Bank",           "ticker": "INDUSINDBK.NS", "sector": "Banking & Financials",   "tier": 2},
-    {"name": "Bank of Baroda",          "ticker": "BANKBARODA.NS", "sector": "Banking & Financials",   "tier": 2},
-    {"name": "TCS",                     "ticker": "TCS.NS",        "sector": "IT",                     "tier": 1},
-    {"name": "Infosys",                 "ticker": "INFY.NS",       "sector": "IT",                     "tier": 1},
-    {"name": "HCL Technologies",        "ticker": "HCLTECH.NS",    "sector": "IT",                     "tier": 2},
-    {"name": "Wipro",                   "ticker": "WIPRO.NS",      "sector": "IT",                     "tier": 2},
-    {"name": "Tech Mahindra",           "ticker": "TECHM.NS",      "sector": "IT",                     "tier": 2},
-    {"name": "ONGC",                    "ticker": "ONGC.NS",       "sector": "Energy",                 "tier": 2},
-    {"name": "BPCL",                    "ticker": "BPCL.NS",       "sector": "Energy",                 "tier": 2},
-    {"name": "Tata Motors",             "ticker": "TATAMOTORS.NS", "sector": "Auto",                   "tier": 1},
-    {"name": "Maruti Suzuki",           "ticker": "MARUTI.NS",     "sector": "Auto",                   "tier": 1},
-    {"name": "Mahindra & Mahindra",     "ticker": "M&M.NS",        "sector": "Auto",                   "tier": 1},
-    {"name": "Bajaj Auto",              "ticker": "BAJAJ-AUTO.NS", "sector": "Auto",                   "tier": 2},
-    {"name": "Eicher Motors",           "ticker": "EICHERMOT.NS",  "sector": "Auto",                   "tier": 2},
-    {"name": "Tata Steel",              "ticker": "TATASTEEL.NS",  "sector": "Metals",                 "tier": 1},
-    {"name": "JSW Steel",               "ticker": "JSWSTEEL.NS",   "sector": "Metals",                 "tier": 2},
-    {"name": "Hindalco",                "ticker": "HINDALCO.NS",   "sector": "Metals",                 "tier": 2},
-    {"name": "Vedanta",                 "ticker": "VEDL.NS",       "sector": "Metals",                 "tier": 2},
-    {"name": "ITC",                     "ticker": "ITC.NS",        "sector": "FMCG",                   "tier": 1},
-    {"name": "Hindustan Unilever",      "ticker": "HINDUNILVR.NS", "sector": "FMCG",                   "tier": 2},
-    {"name": "Nestle India",            "ticker": "NESTLEIND.NS",  "sector": "FMCG",                   "tier": 2},
-    {"name": "Bharti Airtel",           "ticker": "BHARTIARTL.NS", "sector": "Telecom & Infra",        "tier": 1},
-    {"name": "Larsen & Toubro",         "ticker": "LT.NS",         "sector": "Telecom & Infra",        "tier": 1},
-    {"name": "Sun Pharma",              "ticker": "SUNPHARMA.NS",  "sector": "Pharma",                 "tier": 2},
-    {"name": "Dr. Reddy's Labs",        "ticker": "DRREDDY.NS",    "sector": "Pharma",                 "tier": 2},
-    {"name": "Adani Enterprises",       "ticker": "ADANIENT.NS",   "sector": "Diversified",            "tier": 2},
-    {"name": "Adani Ports",             "ticker": "ADANIPORTS.NS", "sector": "Diversified",            "tier": 2},
-    {"name": "NTPC",                    "ticker": "NTPC.NS",       "sector": "PSU & Power",            "tier": 2},
-    {"name": "Power Grid",              "ticker": "POWERGRID.NS",  "sector": "PSU & Power",            "tier": 2},
-    {"name": "Crude Oil (MCX proxy)",   "ticker": "CL=F",          "sector": "Commodities",             "tier": 2,
-     "note": "NYMEX WTI (USD) — global proxy, not the exact MCX INR contract"},
-    {"name": "Natural Gas (MCX proxy)", "ticker": "NG=F",          "sector": "Commodities",             "tier": 2,
-     "note": "NYMEX Henry Hub (USD) — global proxy, not the exact MCX INR contract"},
-]
 
 # ─────────────────────────────────────────────────────────────
-#  DATA FETCH  (cached — freshness aligned to the user-chosen refresh rate
-#  via a "time bucket" argument, not a fixed ttl. The bucket number only
-#  changes once per chosen interval, so Streamlit's cache naturally returns
-#  fresh data exactly on that cadence — 5 Min / 15 Min / 30 Min / 1 Hour.)
+#  DATA LOADING — reads the background updater's output instead of
+#  calling Yahoo Finance directly. Cached briefly so a burst of page
+#  interactions doesn't hammer GitHub, but short enough that a fresh
+#  Action run shows up quickly.
 # ─────────────────────────────────────────────────────────────
-def time_bucket(interval_seconds: int) -> int:
-    now_ts = int(time.time())
-    return now_ts - (now_ts % interval_seconds)
+@st.cache_data(ttl=60, show_spinner=False)
+def load_dataset(_cache_buster: int):
+    try:
+        resp = requests.get(GITHUB_RAW_URL, timeout=10, headers={"Cache-Control": "no-cache"})
+        resp.raise_for_status()
+        return resp.json(), None
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
 
 
-def _fetch_ohlcv_raw(ticker: str, interval: str, period: str):
-    """Retries once on failure (Yahoo Finance is prone to transient rate-limit
-    errors on cloud-hosted IPs) and returns the real error message so it can
-    be surfaced for diagnostics instead of silently swallowed."""
-    last_err = None
-    for attempt in range(2):
-        try:
-            df = yf.Ticker(ticker).history(period=period, interval=interval)
-            if df is not None and not df.empty:
-                return df, None
-            last_err = "Yahoo returned no data (empty response)"
-        except Exception as e:
-            last_err = f"{type(e).__name__}: {e}"
-        if attempt == 0:
-            time.sleep(0.8)
-    return None, last_err
+def parse_generated_at(iso_str):
+    if not iso_str:
+        return None
+    try:
+        return datetime.fromisoformat(iso_str)
+    except Exception:
+        return None
 
 
-@st.cache_data(ttl=7200, show_spinner=False)
-def fetch_ohlcv(ticker: str, interval: str, period: str, _bucket: int):
-    df, err = _fetch_ohlcv_raw(ticker, interval, period)
-    return df, err
-
-
-@st.cache_data(ttl=7200, show_spinner=False)
-def compute_pine_table(ticker: str, _bucket: int):
-    """
-    Returns {'tech': {...}, 'fetched_at': datetime, 'ok': bool, 'errors': {tf: msg}}
-    '_bucket' controls freshness: it only changes once per chosen refresh
-    interval (or immediately after a manual "Refresh now" click), so this
-    function only actually re-runs when data should genuinely be re-fetched.
-    'ok' is False if any timeframe failed — 'errors' holds the real reason
-    (e.g. a Yahoo rate-limit message) for the debug panel.
-    """
-    tf_specs = {
-        "Day": ("1d", "1y", False),
-        "1H":  ("1h", "1mo", True),
-        "5M":  ("5m", "5d", True),
-    }
-    tech = {}
-    errors = {}
-    ok = True
-    for label, (interval, period, intraday) in tf_specs.items():
-        df, err = fetch_ohlcv(ticker, interval, period, _bucket)
-        result = ind.batch(df, intraday=intraday) if df is not None else None
-        tech[label] = result
-        if result is None:
-            ok = False
-            errors[label] = err or "Unknown error"
-    return {"tech": tech, "fetched_at": datetime.now(), "ok": ok, "errors": errors}
+def minutes_ago(dt):
+    if dt is None:
+        return None
+    now = datetime.now(dt.tzinfo) if dt.tzinfo else datetime.now()
+    return (now - dt).total_seconds() / 60
 
 
 # ─────────────────────────────────────────────────────────────
@@ -324,7 +262,10 @@ st.markdown("<div id='alerts_top'></div>", unsafe_allow_html=True)
 REFRESH_OPTIONS = {"5 Min": 300, "15 Min": 900, "30 Min": 1800, "1 Hour": 3600}
 
 # Default refresh rate = 15 Min, unless the person saved a different default
-# (saved via query param — see "💾 Save as default" below).
+# (saved via query param — see "💾 Save as default" below). Note: this now
+# controls how often the PAGE re-checks data/latest.json (cheap, safe) — it
+# no longer controls how often Yahoo Finance is called, since that's the
+# background updater's job now, on its own independent schedule.
 saved_refresh = st.query_params.get("refresh", "15 Min")
 if saved_refresh not in REFRESH_OPTIONS:
     saved_refresh = "15 Min"
@@ -332,26 +273,16 @@ default_index = list(REFRESH_OPTIONS.keys()).index(saved_refresh)
 
 topA, topB = st.columns([2, 3])
 with topA:
-    refresh_label = st.selectbox("⏱ Refresh rate", list(REFRESH_OPTIONS.keys()), index=default_index)
+    refresh_label = st.selectbox("⏱ Check for new data every", list(REFRESH_OPTIONS.keys()), index=default_index)
     if st.button("💾 Save as default"):
         st.query_params["refresh"] = refresh_label
         st.success(f"Saved. Bookmark this page's URL now — that's what makes {refresh_label} open by default next time.")
 refresh_seconds = REFRESH_OPTIONS[refresh_label]
 
-st.caption(
-    f"Auto-refreshing every {refresh_label} · Data via Yahoo Finance "
-    "(≈15-20 min delayed) · Not investment advice — verify on your broker "
-    "terminal before trading."
-)
-
-# Silently reruns the app on the chosen cadence — combined with the
-# time_bucket() cache key below, this is what makes data actually
-# re-fetch on that schedule, not just re-render the same numbers.
 st_autorefresh(interval=refresh_seconds * 1000, key="auto_refresh_tick")
-current_bucket = time_bucket(refresh_seconds)
 
-if "manual_override_bucket" not in st.session_state:
-    st.session_state["manual_override_bucket"] = 0
+if "manual_cache_buster" not in st.session_state:
+    st.session_state["manual_cache_buster"] = 0
 
 col1, col2, col3 = st.columns([2, 2, 1])
 with col1:
@@ -363,16 +294,48 @@ with col3:
     st.write("")
     st.write("")
     if st.button("🔄 Refresh now"):
-        # This is what actually forces a genuine re-fetch on demand — a plain
-        # st.rerun() alone does NOT bypass the interval-based cache, which was
-        # the real reason the button looked like it "did nothing" before.
-        st.session_state["manual_override_bucket"] = int(time.time())
+        st.session_state["manual_cache_buster"] += 1
         st.rerun()
 
-# effective_bucket = whichever is newer: the natural interval schedule, or a
-# just-clicked manual override. Once real time catches up past the override,
-# normal cadence silently resumes on its own.
-effective_bucket = max(current_bucket, st.session_state["manual_override_bucket"])
+cache_buster = int(time.time() // 60) * 1000 + st.session_state["manual_cache_buster"]
+dataset, load_err = load_dataset(cache_buster)
+
+# ── Data freshness banner ──
+if load_err:
+    st.error(
+        f"⚠ Couldn't reach the data file on GitHub: {load_err}  \n"
+        "Check that GITHUB_RAW_URL at the top of streamlit_app.py points to "
+        "your actual repo, and that data/latest.json exists there."
+    )
+    st.stop()
+
+generated_dt = parse_generated_at(dataset.get("generated_at")) if dataset else None
+if generated_dt is None:
+    st.warning(
+        "⏳ No data yet — the background updater (GitHub Actions) hasn't completed "
+        "its first run. This can take up to 15 minutes after setup, or trigger it "
+        "manually: your GitHub repo → Actions tab → 'Update FNO Dashboard Data' → "
+        "'Run workflow'."
+    )
+    st.stop()
+
+age_min = minutes_ago(generated_dt)
+freshness_color = "#2fd88a" if age_min < 20 else ("#d9a63d" if age_min < 60 else "#ff5c6a")
+freshness_note = "" if age_min < 20 else "  — this looks stale; check the Actions tab on GitHub for errors."
+st.markdown(
+    f"<div style='background:#11151d;border:1px solid {freshness_color};border-radius:8px;"
+    f"padding:8px 14px;margin-bottom:10px;font-family:\"JetBrains Mono\",monospace;font-size:12.5px;'>"
+    f"<span style='color:{freshness_color};font-weight:700;'>●</span> "
+    f"Background data last updated: <b style='color:{freshness_color}'>{generated_dt.strftime('%d-%b %H:%M:%S')}</b> "
+    f"({age_min:.0f} min ago){freshness_note}"
+    f"</div>",
+    unsafe_allow_html=True,
+)
+st.caption(
+    "Not investment advice — verify on your broker terminal before trading. "
+    "Data is fetched by a background job on GitHub (see update_data.py), "
+    "independent of whether this page is open."
+)
 
 filter_choice = st.selectbox(
     "⭐ Priority filter (matching stocks float to the top; nothing is hidden)",
@@ -408,32 +371,28 @@ filtered = [
 if not filtered:
     st.info("No match — try a different search or sector.")
 else:
-    # Precompute technicals for every visible stock up front — needed so we
-    # can sort by the filter before rendering, not just while scrolling.
-    # Small pacing between every call (not just failures) spreads requests
-    # out over time instead of bursting Yahoo Finance all at once — bursts
-    # are the most common cause of the "many symbols refresh failed" pattern
-    # on cloud-hosted IPs.
-    progress = st.progress(0.0, text="Fetching data…")
+    # Read each visible stock's precomputed technicals straight out of the
+    # already-loaded dataset — no network calls happen here at all, so this
+    # is instant and carries zero rate-limit risk.
     enriched = []
     all_errors = {}
-    for i, s in enumerate(filtered):
-        result = compute_pine_table(s["ticker"], effective_bucket)
-        enriched.append({"stock": s, "tech": result["tech"], "fetched_at": result["fetched_at"], "ok": result["ok"]})
-        if not result["ok"]:
-            all_errors[s["name"]] = result["errors"]
-        progress.progress((i + 1) / len(filtered), text=f"Loaded {s['name']}")
-        time.sleep(0.08)
-    progress.empty()
+    stocks_data = dataset.get("stocks", {})
+    for s in filtered:
+        entry = stocks_data.get(s["ticker"])
+        if entry is None:
+            enriched.append({"stock": s, "tech": {"Day": None, "1H": None, "5M": None}, "ok": False})
+            all_errors[s["name"]] = {"—": "Not present in the latest dataset (new stock? wait for next Action run)"}
+            continue
+        enriched.append({"stock": s, "tech": entry.get("tech", {}), "ok": entry.get("ok", False)})
+        if not entry.get("ok", True):
+            all_errors[s["name"]] = entry.get("errors", {})
 
     if all_errors:
-        with st.expander(f"⚠ Debug info — {len(all_errors)} stock(s) failed to refresh", expanded=False):
+        with st.expander(f"⚠ Debug info — {len(all_errors)} stock(s) failed in the last background run", expanded=False):
             st.caption(
                 "If you see '429', 'rate limit', or 'Too Many Requests' below, "
-                "Yahoo Finance is temporarily blocking this app's shared cloud IP "
-                "— this is a known limitation of free hosting, not a bug in your "
-                "settings. It usually clears on its own; if it persists for hours, "
-                "consider the Angel One real-data option we discussed earlier."
+                "Yahoo Finance temporarily rate-limited the background job — it "
+                "will retry automatically on the next scheduled run."
             )
             for name, errs in all_errors.items():
                 for tf, msg in errs.items():
@@ -586,9 +545,9 @@ else:
                         match_badge = "<span style='background:#d9a63d;color:#1a1408;padding:2px 8px;border-radius:5px;font-size:11px;font-weight:700;margin-left:8px;'>MATCH</span>"
 
                     if row["ok"]:
-                        updated_html = f"<span class='updated-badge updated-ok'>✓ Updated {row['fetched_at'].strftime('%H:%M:%S')}</span>"
+                        updated_html = "<span class='updated-badge updated-ok'>✓ OK</span>"
                     else:
-                        updated_html = "<span class='updated-badge updated-fail'>⚠ Refresh failed</span>"
+                        updated_html = "<span class='updated-badge updated-fail'>⚠ Failed last run</span>"
 
                     st.markdown(
                         f"""
@@ -618,10 +577,9 @@ st.caption(
     "Table columns: H (SMA breakout dot), GMMA (Guppy oscillator cross + "
     "bars since), WT (WaveTrend cross + triangle strength), ADX/DI (trend "
     "strength + dominant direction), RSI (value + candles since crossing "
-    "60/40, green >60 / red <40). STCR and SF 4-Factor were removed to "
-    "reduce computation load. Data delayed ~15-20 min via Yahoo Finance — "
-    "free tools trade timeliness for zero cost. For real-time, use your "
-    "TradingView Pine Script indicator. A stock showing '⚠ Refresh failed' "
-    "means Yahoo Finance didn't return data for it on the last fetch — "
-    "click '🔄 Refresh now' to retry."
+    "60/40, green >60 / red <40). Data is fetched and computed by a "
+    "background job on GitHub (update_data.py) on its own schedule, "
+    "independent of this page — see the freshness banner above for exactly "
+    "when it last ran. For real-time data, use your TradingView Pine "
+    "Script indicator."
 )

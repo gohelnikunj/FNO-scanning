@@ -39,7 +39,7 @@ from stock_list import STOCKS
 # ─────────────────────────────────────────────────────────────
 #  ⚠ ONE-TIME SETUP — replace with YOUR GitHub username/repo
 # ─────────────────────────────────────────────────────────────
-GITHUB_RAW_URL = "https://raw.githubusercontent.com/gohelnikunj/fno-dashboard/main/data/latest.json"
+GITHUB_RAW_URL = "https://raw.githubusercontent.com/gohelnikunj/FNO-scanning/main/data/latest.json"
 
 IST = timezone(timedelta(hours=5, minutes=30))
 

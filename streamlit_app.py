@@ -18,11 +18,13 @@ HOW TO DEPLOY FOR FREE (no local computer needed):
     See SETUP_GUIDE.md in this same folder for step-by-step instructions.
 """
 
+import time
 import numpy as np
 import pandas as pd
 import streamlit as st
 import yfinance as yf
 from datetime import datetime
+from streamlit_autorefresh import st_autorefresh
 
 import indicators as ind
 
@@ -84,10 +86,18 @@ STOCKS = [
 ]
 
 # ─────────────────────────────────────────────────────────────
-#  DATA FETCH  (cached — refreshes automatically every 5 minutes)
+#  DATA FETCH  (cached — freshness aligned to the user-chosen refresh rate
+#  via a "time bucket" argument, not a fixed ttl. The bucket number only
+#  changes once per chosen interval, so Streamlit's cache naturally returns
+#  fresh data exactly on that cadence — 5 Min / 15 Min / 30 Min / 1 Hour.)
 # ─────────────────────────────────────────────────────────────
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_ohlcv(ticker: str, interval: str, period: str):
+def time_bucket(interval_seconds: int) -> int:
+    now_ts = int(time.time())
+    return now_ts - (now_ts % interval_seconds)
+
+
+@st.cache_data(ttl=7200, show_spinner=False)
+def fetch_ohlcv(ticker: str, interval: str, period: str, _bucket: int):
     try:
         df = yf.Ticker(ticker).history(period=period, interval=interval)
         if df is None or df.empty:
@@ -97,12 +107,13 @@ def fetch_ohlcv(ticker: str, interval: str, period: str):
         return None
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def compute_pine_table(ticker: str):
+@st.cache_data(ttl=7200, show_spinner=False)
+def compute_pine_table(ticker: str, _bucket: int):
     """
     Returns {'tech': {'Day':{...},'1H':{...},'5M':{...}}, 'fetched_at': datetime, 'ok': bool}
-    'fetched_at' only changes when this function actually re-runs (cache miss) —
-    that's what makes it a true "last updated" time, not just "page opened" time.
+    '_bucket' controls freshness: it only changes once per chosen refresh
+    interval, so this function only actually re-runs (and 'fetched_at' only
+    changes) on that cadence — not on every page interaction.
     'ok' is False if any timeframe failed to fetch, so a stale/broken stock is visible.
     """
     tf_specs = {
@@ -113,7 +124,7 @@ def compute_pine_table(ticker: str):
     tech = {}
     ok = True
     for label, (interval, period, intraday) in tf_specs.items():
-        df = fetch_ohlcv(ticker, interval, period)
+        df = fetch_ohlcv(ticker, interval, period, _bucket)
         result = ind.batch(df, intraday=intraday) if df is not None else None
         tech[label] = result
         if result is None:
@@ -294,11 +305,25 @@ st.markdown(
 )
 
 st.title("📊 Jashvi FNO Scanner")
+
+REFRESH_OPTIONS = {"5 Min": 300, "15 Min": 900, "30 Min": 1800, "1 Hour": 3600}
+
+topA, topB = st.columns([2, 3])
+with topA:
+    refresh_label = st.selectbox("⏱ Refresh rate", list(REFRESH_OPTIONS.keys()), index=0)
+refresh_seconds = REFRESH_OPTIONS[refresh_label]
+
 st.caption(
-    "Free, self-refreshing every 5 minutes · Data via Yahoo Finance "
+    f"Auto-refreshing every {refresh_label} · Data via Yahoo Finance "
     "(≈15-20 min delayed) · Not investment advice — verify on your broker "
     "terminal before trading."
 )
+
+# Silently reruns the app on the chosen cadence — combined with the
+# time_bucket() cache key below, this is what makes data actually
+# re-fetch on that schedule, not just re-render the same numbers.
+st_autorefresh(interval=refresh_seconds * 1000, key="auto_refresh_tick")
+current_bucket = time_bucket(refresh_seconds)
 
 col1, col2, col3 = st.columns([2, 2, 1])
 with col1:
@@ -310,7 +335,6 @@ with col3:
     st.write("")
     st.write("")
     if st.button("🔄 Refresh now"):
-        st.cache_data.clear()
         st.rerun()
 
 filter_choice = st.selectbox(
@@ -321,6 +345,15 @@ filter_choice = st.selectbox(
         "Filter 2: RSI (Daily) < 40 AND RSI (1H) < 40 — bearish alignment",
     ],
 )
+
+with st.expander("🔔 Alerts", expanded=True):
+    alerts_enabled = st.checkbox("Enable alerts below", value=True)
+    preview_mode = st.checkbox("👁 Preview alert appearance (shows a sample, doesn't need a real match)")
+    st.caption(
+        "Alert 1: RSI (Daily) > 60 AND RSI (1H) > 60 — bullish alignment.  "
+        "Alert 2: RSI (Daily) < 60 AND RSI (1H) < 60 — below the 60 line on both."
+    )
+    alert_placeholder = st.container()
 
 filtered = [
     s for s in STOCKS
@@ -333,12 +366,17 @@ if not filtered:
 else:
     # Precompute technicals for every visible stock up front — needed so we
     # can sort by the filter before rendering, not just while scrolling.
+    # Small pacing between calls (only matters on true cache misses) avoids
+    # bursting Yahoo Finance with dozens of near-simultaneous requests,
+    # which is what was causing failed fetches right after a refresh.
     progress = st.progress(0.0, text="Fetching data…")
     enriched = []
     for i, s in enumerate(filtered):
-        result = compute_pine_table(s["ticker"])
+        result = compute_pine_table(s["ticker"], current_bucket)
         enriched.append({"stock": s, "tech": result["tech"], "fetched_at": result["fetched_at"], "ok": result["ok"]})
         progress.progress((i + 1) / len(filtered), text=f"Loaded {s['name']}")
+        if not result["ok"]:
+            time.sleep(0.15)  # only pause after an actual failure, not on cache hits
     progress.empty()
 
     def matches_filter(tech):
@@ -360,6 +398,53 @@ else:
             row["_match"] = ok
             row["_score"] = score
         enriched.sort(key=lambda r: (not r["_match"], -r["_score"]))
+
+    # ── Alert checks (Alert 1: RSI D>60 & RSI 1H>60 · Alert 2: RSI D<60 & RSI 1H<60) ──
+    def alert_status(tech):
+        d = tech.get("Day")
+        h = tech.get("1H")
+        if d is None or h is None or pd.isna(d.get("rsi", np.nan)) or pd.isna(h.get("rsi", np.nan)):
+            return None, None, None
+        return d["rsi"], h["rsi"], (
+            1 if (d["rsi"] > 60 and h["rsi"] > 60) else
+            2 if (d["rsi"] < 60 and h["rsi"] < 60) else
+            0
+        )
+
+    def alert_row_html(name, day_rsi, h1_rsi, which):
+        if which == 1:
+            bg, border, txt, icon, label = "#11221a", "#1e4a34", "#2fd88a", "🔔", "Alert 1 — Bullish"
+        else:
+            bg, border, txt, icon, label = "#2a1414", "#4a1e1e", "#ff5c6a", "🔔", "Alert 2 — Below 60"
+        return (
+            f"<div style='background:{bg};border:1px solid {border};border-radius:8px;"
+            f"padding:8px 12px;margin-bottom:6px;display:flex;justify-content:space-between;"
+            f"align-items:center;font-family:JetBrains Mono,monospace;font-size:12.5px;'>"
+            f"<span style='color:{txt};font-weight:700;'>{icon} {label} — {name}</span>"
+            f"<span style='color:{txt};'>RSI(D) {day_rsi:.2f} · RSI(1H) {h1_rsi:.2f}</span>"
+            f"</div>"
+        )
+
+    with alert_placeholder:
+        if preview_mode:
+            st.markdown("**Preview (sample data — not a real signal):**", unsafe_allow_html=True)
+            st.markdown(alert_row_html("Sample Stock Ltd. (DEMO)", 68.42, 64.10, 1), unsafe_allow_html=True)
+            st.markdown(alert_row_html("Sample Stock Ltd. (DEMO)", 45.30, 52.75, 2), unsafe_allow_html=True)
+        elif alerts_enabled:
+            a1_hits, a2_hits = [], []
+            for row in enriched:
+                d_rsi, h_rsi, which = alert_status(row["tech"])
+                if which == 1:
+                    a1_hits.append((row["stock"]["name"], d_rsi, h_rsi))
+                elif which == 2:
+                    a2_hits.append((row["stock"]["name"], d_rsi, h_rsi))
+            if not a1_hits and not a2_hits:
+                st.caption("No stocks currently matching either alert condition.")
+            else:
+                for name, d_rsi, h_rsi in a1_hits:
+                    st.markdown(alert_row_html(name, d_rsi, h_rsi, 1), unsafe_allow_html=True)
+                for name, d_rsi, h_rsi in a2_hits:
+                    st.markdown(alert_row_html(name, d_rsi, h_rsi, 2), unsafe_allow_html=True)
 
     # Two stocks side by side (Streamlit naturally stacks these to one
     # column on narrow mobile screens, since two full tables truly can't

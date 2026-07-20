@@ -5,10 +5,11 @@ F&O Liquidity + Full Technicals Dashboard
 Data source: Yahoo Finance (via the yfinance library), which is free but
 delayed roughly 15-20 minutes for Indian (NSE) symbols.
 
-The expandable "Technicals" panel below each stock reproduces your Pine
-Script's exact 9-column table:
-    TF | H | GMMA | WT | STCR | ADX | DI | RSI | SF
+The technicals panel below each stock reproduces a trimmed version of your
+Pine Script's table:
+    TF | H | GMMA | WT | ADX | DI | RSI
 for Day / 1H / 5M, using the same indicator logic (see indicators.py).
+(STCR and SF 4-Factor were removed by request to reduce computation load.)
 
 HOW TO RUN LOCALLY (optional, for testing on your own computer):
     pip install -r requirements.txt
@@ -158,13 +159,13 @@ TF_BG_COLOR = {"Day": "#0a1420", "1H": "#080e16", "5M": "#060c12"}
 
 def render_pine_table(tech: dict) -> str:
     header_bg = "#0d1b2a"
-    cols = ["TF", "H", "GMMA", "WT", "STCR", "ADX", "DI", "RSI", "SF"]
-    header_colors = ["#ffffff", "#82b1ff", "#ce93d8", "#ce93d8", "#a5d6a7", "#82b1ff", "#82b1ff", "#ffcc80", "#90caf9"]
+    cols = ["TF", "H", "GMMA", "WT", "ADX", "DI", "RSI"]
+    header_colors = ["#ffffff", "#82b1ff", "#ce93d8", "#ce93d8", "#82b1ff", "#82b1ff", "#ffcc80"]
 
     # NOTE: nowrap + horizontal scroll wrapper keeps every timeframe row
-    # fully side-by-side (all 8 columns in one line) on mobile instead of
-    # wrapping/stacking — user swipes sideways if the screen is narrow,
-    # rather than columns collapsing under each other.
+    # fully side-by-side on mobile instead of wrapping/stacking — user
+    # swipes sideways if the screen is narrow, rather than columns
+    # collapsing under each other.
     html = """
     <div style='overflow-x:auto;-webkit-overflow-scrolling:touch;border-radius:8px;'>
     <table style='border-collapse:collapse;font-family:"JetBrains Mono",monospace;font-size:11.5px;white-space:nowrap;width:auto;'>
@@ -182,7 +183,7 @@ def render_pine_table(tech: dict) -> str:
         html += f"<td style='padding:4px 7px;text-align:center;color:{row_color};font-weight:700;border:1px solid #1e3048;'>{tf_label}</td>"
 
         if t is None:
-            html += f"<td colspan='8' style='padding:4px 7px;text-align:center;color:#c9d1de;border:1px solid #1e3048;'>Not enough data</td></tr>"
+            html += f"<td colspan='6' style='padding:4px 7px;text-align:center;color:#c9d1de;border:1px solid #1e3048;'>Not enough data</td></tr>"
             continue
 
         # H
@@ -191,8 +192,6 @@ def render_pine_table(tech: dict) -> str:
         html += f"<td style='padding:4px 7px;text-align:center;color:{ind.dir_col(t['gmma_dir'])};border:1px solid #1e3048;'>{ind.gmma_txt(t['gmma_dir'], t['gmma_bars'])}</td>"
         # WT
         html += f"<td style='padding:4px 7px;text-align:center;color:{ind.dir_col(t['wt_dir'])};border:1px solid #1e3048;'>{ind.wt_tri_txt(t['wt_dir'], t['wt_bars'], t['wt_cval'], t['wt_ob'], t['wt_os'])}</td>"
-        # STCR
-        html += f"<td style='padding:4px 7px;text-align:center;color:{ind.dir_col(t['stcr_dir'])};border:1px solid #1e3048;'>{ind.stcr_tri_txt(t['stcr_dir'], t['stcr_bars'], t['stcr_kv'])}</td>"
         # ADX (neutral/white — trend strength only, no direction) — colored directly on the td
         adx_txt = ind.adx_val_txt(t["adx"])
         html += f"<td style='padding:4px 7px;text-align:center;color:#f1f4f8;border:1px solid #1e3048;'>{adx_txt}</td>"
@@ -203,8 +202,6 @@ def render_pine_table(tech: dict) -> str:
         # RSI (value + candles since crossing 60/40, matching the other columns' style)
         rsi_txt = ind.rsi_val_txt_with_bars(t["rsi"], t.get("rsi_bars_60"), t.get("rsi_bars_40"))
         html += f"<td style='padding:4px 7px;text-align:center;color:{ind.rsi_col(t['rsi'])};border:1px solid #1e3048;'>{rsi_txt}</td>"
-        # SF
-        html += f"<td style='padding:4px 7px;text-align:center;color:{ind.sf_col(t['sf'])};font-weight:700;border:1px solid #1e3048;'>{ind.sf_txt(t['sf'])}</td>"
         html += "</tr>"
 
     html += "</table></div>"
@@ -618,13 +615,13 @@ else:
 
 st.divider()
 st.caption(
-    "Table replicates your Pine Script exactly: H (SMA breakout dot), GMMA "
-    "(Guppy oscillator cross + bars since), WT (WaveTrend cross + triangle "
-    "strength), STCR (Stochastic RSI cross), ADX/DI (trend strength + "
-    "dominant direction), RSI (value + candles since crossing 60/40, green "
-    ">60 / red <40), SF (4-factor BUY/SELL/NEU). Data delayed ~15-20 min via "
-    "Yahoo Finance — free tools trade timeliness for zero cost. For "
-    "real-time, use your TradingView Pine Script indicator. A stock showing "
-    "'⚠ Refresh failed' means Yahoo Finance didn't return data for it on the "
-    "last fetch — click '🔄 Refresh now' to retry."
+    "Table columns: H (SMA breakout dot), GMMA (Guppy oscillator cross + "
+    "bars since), WT (WaveTrend cross + triangle strength), ADX/DI (trend "
+    "strength + dominant direction), RSI (value + candles since crossing "
+    "60/40, green >60 / red <40). STCR and SF 4-Factor were removed to "
+    "reduce computation load. Data delayed ~15-20 min via Yahoo Finance — "
+    "free tools trade timeliness for zero cost. For real-time, use your "
+    "TradingView Pine Script indicator. A stock showing '⚠ Refresh failed' "
+    "means Yahoo Finance didn't return data for it on the last fetch — "
+    "click '🔄 Refresh now' to retry."
 )

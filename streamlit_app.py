@@ -19,6 +19,7 @@ HOW TO DEPLOY FOR FREE (no local computer needed):
 """
 
 import time
+import re
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -96,25 +97,39 @@ def time_bucket(interval_seconds: int) -> int:
     return now_ts - (now_ts % interval_seconds)
 
 
+def _fetch_ohlcv_raw(ticker: str, interval: str, period: str):
+    """Retries once on failure (Yahoo Finance is prone to transient rate-limit
+    errors on cloud-hosted IPs) and returns the real error message so it can
+    be surfaced for diagnostics instead of silently swallowed."""
+    last_err = None
+    for attempt in range(2):
+        try:
+            df = yf.Ticker(ticker).history(period=period, interval=interval)
+            if df is not None and not df.empty:
+                return df, None
+            last_err = "Yahoo returned no data (empty response)"
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {e}"
+        if attempt == 0:
+            time.sleep(0.8)
+    return None, last_err
+
+
 @st.cache_data(ttl=7200, show_spinner=False)
 def fetch_ohlcv(ticker: str, interval: str, period: str, _bucket: int):
-    try:
-        df = yf.Ticker(ticker).history(period=period, interval=interval)
-        if df is None or df.empty:
-            return None
-        return df
-    except Exception:
-        return None
+    df, err = _fetch_ohlcv_raw(ticker, interval, period)
+    return df, err
 
 
 @st.cache_data(ttl=7200, show_spinner=False)
 def compute_pine_table(ticker: str, _bucket: int):
     """
-    Returns {'tech': {'Day':{...},'1H':{...},'5M':{...}}, 'fetched_at': datetime, 'ok': bool}
+    Returns {'tech': {...}, 'fetched_at': datetime, 'ok': bool, 'errors': {tf: msg}}
     '_bucket' controls freshness: it only changes once per chosen refresh
-    interval, so this function only actually re-runs (and 'fetched_at' only
-    changes) on that cadence — not on every page interaction.
-    'ok' is False if any timeframe failed to fetch, so a stale/broken stock is visible.
+    interval (or immediately after a manual "Refresh now" click), so this
+    function only actually re-runs when data should genuinely be re-fetched.
+    'ok' is False if any timeframe failed — 'errors' holds the real reason
+    (e.g. a Yahoo rate-limit message) for the debug panel.
     """
     tf_specs = {
         "Day": ("1d", "1y", False),
@@ -122,14 +137,16 @@ def compute_pine_table(ticker: str, _bucket: int):
         "5M":  ("5m", "5d", True),
     }
     tech = {}
+    errors = {}
     ok = True
     for label, (interval, period, intraday) in tf_specs.items():
-        df = fetch_ohlcv(ticker, interval, period, _bucket)
+        df, err = fetch_ohlcv(ticker, interval, period, _bucket)
         result = ind.batch(df, intraday=intraday) if df is not None else None
         tech[label] = result
         if result is None:
             ok = False
-    return {"tech": tech, "fetched_at": datetime.now(), "ok": ok}
+            errors[label] = err or "Unknown error"
+    return {"tech": tech, "fetched_at": datetime.now(), "ok": ok, "errors": errors}
 
 
 # ─────────────────────────────────────────────────────────────
@@ -305,12 +322,23 @@ st.markdown(
 )
 
 st.title("📊 Jashvi FNO Scanner")
+st.markdown("<div id='alerts_top'></div>", unsafe_allow_html=True)
 
 REFRESH_OPTIONS = {"5 Min": 300, "15 Min": 900, "30 Min": 1800, "1 Hour": 3600}
 
+# Default refresh rate = 15 Min, unless the person saved a different default
+# (saved via query param — see "💾 Save as default" below).
+saved_refresh = st.query_params.get("refresh", "15 Min")
+if saved_refresh not in REFRESH_OPTIONS:
+    saved_refresh = "15 Min"
+default_index = list(REFRESH_OPTIONS.keys()).index(saved_refresh)
+
 topA, topB = st.columns([2, 3])
 with topA:
-    refresh_label = st.selectbox("⏱ Refresh rate", list(REFRESH_OPTIONS.keys()), index=0)
+    refresh_label = st.selectbox("⏱ Refresh rate", list(REFRESH_OPTIONS.keys()), index=default_index)
+    if st.button("💾 Save as default"):
+        st.query_params["refresh"] = refresh_label
+        st.success(f"Saved. Bookmark this page's URL now — that's what makes {refresh_label} open by default next time.")
 refresh_seconds = REFRESH_OPTIONS[refresh_label]
 
 st.caption(
@@ -325,6 +353,9 @@ st.caption(
 st_autorefresh(interval=refresh_seconds * 1000, key="auto_refresh_tick")
 current_bucket = time_bucket(refresh_seconds)
 
+if "manual_override_bucket" not in st.session_state:
+    st.session_state["manual_override_bucket"] = 0
+
 col1, col2, col3 = st.columns([2, 2, 1])
 with col1:
     search = st.text_input("🔍 Search a stock", "")
@@ -335,7 +366,16 @@ with col3:
     st.write("")
     st.write("")
     if st.button("🔄 Refresh now"):
+        # This is what actually forces a genuine re-fetch on demand — a plain
+        # st.rerun() alone does NOT bypass the interval-based cache, which was
+        # the real reason the button looked like it "did nothing" before.
+        st.session_state["manual_override_bucket"] = int(time.time())
         st.rerun()
+
+# effective_bucket = whichever is newer: the natural interval schedule, or a
+# just-clicked manual override. Once real time catches up past the override,
+# normal cadence silently resumes on its own.
+effective_bucket = max(current_bucket, st.session_state["manual_override_bucket"])
 
 filter_choice = st.selectbox(
     "⭐ Priority filter (matching stocks float to the top; nothing is hidden)",
@@ -350,10 +390,17 @@ with st.expander("🔔 Alerts", expanded=True):
     alerts_enabled = st.checkbox("Enable alerts below", value=True)
     preview_mode = st.checkbox("👁 Preview alert appearance (shows a sample, doesn't need a real match)")
     st.caption(
-        "Alert 1: RSI (Daily) > 60 AND RSI (1H) > 60 — bullish alignment.  "
-        "Alert 2: RSI (Daily) < 60 AND RSI (1H) < 60 — below the 60 line on both."
+        "🐂 Bullish: RSI (Daily) > 60 AND RSI (1H) > 60.  🐻 Bearish: RSI (Daily) < 60 "
+        "AND RSI (1H) < 60. Tap a stock name to jump straight to its table below — "
+        "no scrolling needed.  \n"
+        "Full Alignment Alerts (below): RSI + GMMA (D/H/5M) + ADX-DI (H/5M) all "
+        "pointing the same way."
     )
     alert_placeholder = st.container()
+
+def stock_anchor_id(name: str) -> str:
+    return "stock_" + re.sub(r"[^a-zA-Z0-9]", "_", name)
+
 
 filtered = [
     s for s in STOCKS
@@ -366,18 +413,34 @@ if not filtered:
 else:
     # Precompute technicals for every visible stock up front — needed so we
     # can sort by the filter before rendering, not just while scrolling.
-    # Small pacing between calls (only matters on true cache misses) avoids
-    # bursting Yahoo Finance with dozens of near-simultaneous requests,
-    # which is what was causing failed fetches right after a refresh.
+    # Small pacing between every call (not just failures) spreads requests
+    # out over time instead of bursting Yahoo Finance all at once — bursts
+    # are the most common cause of the "many symbols refresh failed" pattern
+    # on cloud-hosted IPs.
     progress = st.progress(0.0, text="Fetching data…")
     enriched = []
+    all_errors = {}
     for i, s in enumerate(filtered):
-        result = compute_pine_table(s["ticker"], current_bucket)
+        result = compute_pine_table(s["ticker"], effective_bucket)
         enriched.append({"stock": s, "tech": result["tech"], "fetched_at": result["fetched_at"], "ok": result["ok"]})
-        progress.progress((i + 1) / len(filtered), text=f"Loaded {s['name']}")
         if not result["ok"]:
-            time.sleep(0.15)  # only pause after an actual failure, not on cache hits
+            all_errors[s["name"]] = result["errors"]
+        progress.progress((i + 1) / len(filtered), text=f"Loaded {s['name']}")
+        time.sleep(0.08)
     progress.empty()
+
+    if all_errors:
+        with st.expander(f"⚠ Debug info — {len(all_errors)} stock(s) failed to refresh", expanded=False):
+            st.caption(
+                "If you see '429', 'rate limit', or 'Too Many Requests' below, "
+                "Yahoo Finance is temporarily blocking this app's shared cloud IP "
+                "— this is a known limitation of free hosting, not a bug in your "
+                "settings. It usually clears on its own; if it persists for hours, "
+                "consider the Angel One real-data option we discussed earlier."
+            )
+            for name, errs in all_errors.items():
+                for tf, msg in errs.items():
+                    st.text(f"{name} [{tf}]: {msg}")
 
     def matches_filter(tech):
         d = tech.get("Day")
@@ -411,40 +474,103 @@ else:
             0
         )
 
-    def alert_row_html(name, day_rsi, h1_rsi, which):
-        if which == 1:
-            bg, border, txt, icon, label = "#11221a", "#1e4a34", "#2fd88a", "🔔", "Alert 1 — Bullish"
+    def alignment_status(tech):
+        """Alert 3/4: RSI D+H | GMMA D+H+5M | ADX-DI H+5M, all pointing the same way."""
+        d, h, m = tech.get("Day"), tech.get("1H"), tech.get("5M")
+        if d is None or h is None or m is None:
+            return 0
+        d_rsi, h_rsi = d.get("rsi", np.nan), h.get("rsi", np.nan)
+        if pd.isna(d_rsi) or pd.isna(h_rsi):
+            return 0
+        h_dip, h_dim = h.get("dip", np.nan), h.get("dim", np.nan)
+        m_dip, m_dim = m.get("dip", np.nan), m.get("dim", np.nan)
+        if pd.isna(h_dip) or pd.isna(h_dim) or pd.isna(m_dip) or pd.isna(m_dim):
+            return 0
+
+        bull = (
+            d_rsi > 60 and h_rsi > 60
+            and d["gmma_dir"] == 1 and h["gmma_dir"] == 1 and m["gmma_dir"] == 1
+            and h_dip >= h_dim and m_dip >= m_dim
+        )
+        bear = (
+            d_rsi < 40 and h_rsi < 40
+            and d["gmma_dir"] == -1 and h["gmma_dir"] == -1 and m["gmma_dir"] == -1
+            and h_dip < h_dim and m_dip < m_dim
+        )
+        if bull:
+            return 3
+        if bear:
+            return 4
+        return 0
+
+    def alignment_row_html(name, which):
+        anchor = stock_anchor_id(name)
+        if which == 3:
+            bg, border, txt, label = "#11221a", "#1e4a34", "#2fd88a", "Full Bullish Alignment"
+            detail = "RSI D▲ H▲ &nbsp;|&nbsp; GMMA D▲ H▲ 5▲ &nbsp;|&nbsp; ADX H▲ 5▲"
         else:
-            bg, border, txt, icon, label = "#2a1414", "#4a1e1e", "#ff5c6a", "🔔", "Alert 2 — Below 60"
+            bg, border, txt, label = "#2a1414", "#4a1e1e", "#ff5c6a", "Full Bearish Alignment"
+            detail = "RSI D▼ H▼ &nbsp;|&nbsp; GMMA D▼ H▼ 5▼ &nbsp;|&nbsp; ADX H▼ 5▼"
         return (
             f"<div style='background:{bg};border:1px solid {border};border-radius:8px;"
-            f"padding:8px 12px;margin-bottom:6px;display:flex;justify-content:space-between;"
-            f"align-items:center;font-family:JetBrains Mono,monospace;font-size:12.5px;'>"
-            f"<span style='color:{txt};font-weight:700;'>{icon} {label} — {name}</span>"
-            f"<span style='color:{txt};'>RSI(D) {day_rsi:.2f} · RSI(1H) {h1_rsi:.2f}</span>"
+            f"padding:8px 12px;margin-bottom:6px;font-family:JetBrains Mono,monospace;font-size:12.5px;'>"
+            f"<a href='#{anchor}' style='color:{txt};font-weight:700;text-decoration:none;'>🔔 {label} — ▶ {name}</a>"
+            f"<div style='color:{txt};margin-top:3px;'>{detail}</div>"
             f"</div>"
         )
+
+    def bull_bear_link(name, color):
+        anchor = stock_anchor_id(name)
+        return f"<a href='#{anchor}' style='color:{color};text-decoration:none;font-family:\"JetBrains Mono\",monospace;font-size:13px;display:block;padding:4px 0;'>▶ {name}</a>"
 
     with alert_placeholder:
         if preview_mode:
             st.markdown("**Preview (sample data — not a real signal):**", unsafe_allow_html=True)
-            st.markdown(alert_row_html("Sample Stock Ltd. (DEMO)", 68.42, 64.10, 1), unsafe_allow_html=True)
-            st.markdown(alert_row_html("Sample Stock Ltd. (DEMO)", 45.30, 52.75, 2), unsafe_allow_html=True)
+            pcol1, pcol2 = st.columns(2)
+            with pcol1:
+                st.markdown("<div style='color:#2fd88a;font-weight:800;font-size:14px;'>🐂 BULLISH (sample)</div>", unsafe_allow_html=True)
+                st.markdown(bull_bear_link("Sample Bull Stock Ltd.", "#2fd88a"), unsafe_allow_html=True)
+            with pcol2:
+                st.markdown("<div style='color:#ff5c6a;font-weight:800;font-size:14px;'>🐻 BEARISH (sample)</div>", unsafe_allow_html=True)
+                st.markdown(bull_bear_link("Sample Bear Stock Ltd.", "#ff5c6a"), unsafe_allow_html=True)
+            st.markdown("<div style='margin-top:10px;'></div>", unsafe_allow_html=True)
+            st.markdown(alignment_row_html("Sample Stock Ltd. (DEMO)", 3), unsafe_allow_html=True)
+            st.markdown(alignment_row_html("Sample Stock Ltd. (DEMO)", 4), unsafe_allow_html=True)
         elif alerts_enabled:
-            a1_hits, a2_hits = [], []
+            bull_hits, bear_hits, a3_hits, a4_hits = [], [], [], []
             for row in enriched:
                 d_rsi, h_rsi, which = alert_status(row["tech"])
+                name = row["stock"]["name"]
                 if which == 1:
-                    a1_hits.append((row["stock"]["name"], d_rsi, h_rsi))
+                    bull_hits.append(name)
                 elif which == 2:
-                    a2_hits.append((row["stock"]["name"], d_rsi, h_rsi))
-            if not a1_hits and not a2_hits:
-                st.caption("No stocks currently matching either alert condition.")
-            else:
-                for name, d_rsi, h_rsi in a1_hits:
-                    st.markdown(alert_row_html(name, d_rsi, h_rsi, 1), unsafe_allow_html=True)
-                for name, d_rsi, h_rsi in a2_hits:
-                    st.markdown(alert_row_html(name, d_rsi, h_rsi, 2), unsafe_allow_html=True)
+                    bear_hits.append(name)
+                align = alignment_status(row["tech"])
+                if align == 3:
+                    a3_hits.append(name)
+                elif align == 4:
+                    a4_hits.append(name)
+
+            bcol1, bcol2 = st.columns(2)
+            with bcol1:
+                st.markdown(f"<div style='color:#2fd88a;font-weight:800;font-size:14px;'>🐂 BULLISH ({len(bull_hits)})</div>", unsafe_allow_html=True)
+                if bull_hits:
+                    st.markdown("".join(bull_bear_link(n, "#2fd88a") for n in bull_hits), unsafe_allow_html=True)
+                else:
+                    st.caption("No matches")
+            with bcol2:
+                st.markdown(f"<div style='color:#ff5c6a;font-weight:800;font-size:14px;'>🐻 BEARISH ({len(bear_hits)})</div>", unsafe_allow_html=True)
+                if bear_hits:
+                    st.markdown("".join(bull_bear_link(n, "#ff5c6a") for n in bear_hits), unsafe_allow_html=True)
+                else:
+                    st.caption("No matches")
+
+            if a3_hits or a4_hits:
+                st.markdown("<div style='margin-top:14px;font-weight:700;color:#c9d1de;'>Full Alignment Alerts</div>", unsafe_allow_html=True)
+                for name in a3_hits:
+                    st.markdown(alignment_row_html(name, 3), unsafe_allow_html=True)
+                for name in a4_hits:
+                    st.markdown(alignment_row_html(name, 4), unsafe_allow_html=True)
 
     # Two stocks side by side (Streamlit naturally stacks these to one
     # column on narrow mobile screens, since two full tables truly can't
@@ -456,6 +582,7 @@ else:
         for col, row in zip(grid, pair):
             s, tech = row["stock"], row["tech"]
             with col:
+                st.markdown(f"<div id='{stock_anchor_id(s['name'])}' style='position:relative;top:-70px;'></div>", unsafe_allow_html=True)
                 with st.container(border=True):
                     match_badge = ""
                     if filter_choice != "None" and row.get("_match"):
@@ -472,9 +599,13 @@ else:
                             <span class='name-badge'>{s['name']}{match_badge}</span>
                             {updated_html}
                         </div>
-                        <div style='margin-top:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;'>
-                            <span class='stock-sector'>{s['sector']}</span>
-                            <span class='ticker-chip'>{s['ticker']}</span>
+                        <div style='margin-top:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;justify-content:space-between;'>
+                            <span>
+                                <span class='stock-sector'>{s['sector']}</span>
+                                &nbsp;
+                                <span class='ticker-chip'>{s['ticker']}</span>
+                            </span>
+                            <a href='#alerts_top' style='color:#d9a63d;text-decoration:none;font-size:11px;font-family:"JetBrains Mono",monospace;white-space:nowrap;'>🔝 Return to Alert</a>
                         </div>
                         """,
                         unsafe_allow_html=True,

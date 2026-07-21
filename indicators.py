@@ -237,14 +237,26 @@ def rsi_col(v):
 # ─────────────────────────────────────────────────────────────
 def batch(df: pd.DataFrame, hc_len=10, wt_ch=10, wt_avg=21, wt_ma=4, wt_ob=53, wt_os=-53,
           gmma_smooth=1, gmma_signal=13, adx_len=14, rsi_len=14, intraday=True):
+    
+    # CRITICAL FIX: Early validation
     if df is None or len(df) < 60:
         return None
+    
+    # Ensure we have required columns
+    required_cols = ['High', 'Low', 'Close']
+    if not all(col in df.columns for col in required_cols):
+        return None
+    
+    # Drop any rows with NaN in critical columns
+    df_clean = df[required_cols].dropna()
+    if len(df_clean) < 60:
+        return None
 
-    hc_v = h_condition(df, hc_len)
-    gmma_dir, gmma_bars = gmma_state(df["Close"], gmma_smooth, gmma_signal)
-    wt_dir, wt_bars, wt_cval, wt_ob_v, wt_os_v = wavetrend(df, wt_ch, wt_avg, wt_ma, wt_ob, wt_os)
-    adxv, dip, dim = adx_di(df["High"], df["Low"], df["Close"], adx_len)
-    rsi_full = rsi_series(df["Close"], rsi_len)
+    hc_v = h_condition(df_clean, hc_len)
+    gmma_dir, gmma_bars = gmma_state(df_clean["Close"], gmma_smooth, gmma_signal)
+    wt_dir, wt_bars, wt_cval, wt_ob_v, wt_os_v = wavetrend(df_clean, wt_ch, wt_avg, wt_ma, wt_ob, wt_os)
+    adxv, dip, dim = adx_di(df_clean["High"], df_clean["Low"], df_clean["Close"], adx_len)
+    rsi_full = rsi_series(df_clean["Close"], rsi_len)
     rsi_v = rsi_full.iloc[-1]
     rsi_bars_60 = rsi_cross_bars(rsi_full, 60, "up") if (not pd.isna(rsi_v) and rsi_v > 60) else None
     rsi_bars_40 = rsi_cross_bars(rsi_full, 40, "down") if (not pd.isna(rsi_v) and rsi_v < 40) else None

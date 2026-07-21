@@ -73,8 +73,31 @@ def fetch_and_compute(ticker: str):
     return tech, ok, errors
 
 
+def is_market_hours(now_ist: datetime) -> bool:
+    """Mon-Fri, ~8:15 AM - 4:35 PM IST (a little buffer either side of the
+    real 9:15-15:30 session). Returns False on weekends / outside this
+    window, so it's safe to trigger this script from an external cron
+    service on a simple fixed interval without that service needing to
+    know about market hours itself — this script just no-ops otherwise.
+    Set ALLOW_OFF_HOURS=1 as an env var to bypass this (useful for testing).
+    """
+    import os
+    if os.environ.get("ALLOW_OFF_HOURS") == "1":
+        return True
+    if now_ist.weekday() >= 5:  # 5=Saturday, 6=Sunday
+        return False
+    minutes = now_ist.hour * 60 + now_ist.minute
+    return (8 * 60 + 15) <= minutes <= (16 * 60 + 35)
+
+
 def main():
     started = datetime.now(IST)
+
+    if not is_market_hours(started):
+        print(f"Outside market hours ({started.strftime('%a %H:%M IST')}) — skipping this run, "
+              f"data/latest.json left untouched.")
+        return
+
     out = {"generated_at": started.isoformat(), "stocks": {}}
     failed_count = 0
 

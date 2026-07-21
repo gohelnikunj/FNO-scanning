@@ -1,5 +1,0 @@
-streamlit
-pandas
-numpy
-streamlit-autorefresh
-requests

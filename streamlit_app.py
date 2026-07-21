@@ -65,7 +65,13 @@ st.set_page_config(
 @st.cache_data(ttl=60, show_spinner=False)
 def load_dataset(_cache_buster: int):
     try:
-        resp = requests.get(GITHUB_RAW_URL, timeout=10, headers={"Cache-Control": "no-cache"})
+        # GitHub's raw-content CDN caches responses for a few minutes at the
+        # edge and doesn't reliably honor a Cache-Control request header to
+        # bypass that. Appending a changing query parameter makes the CDN
+        # treat it as a distinct resource, which does reliably force a fresh
+        # fetch from origin.
+        url = f"{GITHUB_RAW_URL}?cb={_cache_buster}"
+        resp = requests.get(url, timeout=10, headers={"Cache-Control": "no-cache"})
         resp.raise_for_status()
         return resp.json(), None
     except Exception as e:
@@ -295,7 +301,12 @@ with col3:
     st.write("")
     if st.button("🔄 Refresh now"):
         st.session_state["manual_cache_buster"] += 1
+        st.session_state["just_refreshed"] = True
         st.rerun()
+
+if st.session_state.get("just_refreshed"):
+    st.toast("✓ Re-checked GitHub for the latest data", icon="🔄")
+    st.session_state["just_refreshed"] = False
 
 cache_buster = int(time.time() // 60) * 1000 + st.session_state["manual_cache_buster"]
 dataset, load_err = load_dataset(cache_buster)

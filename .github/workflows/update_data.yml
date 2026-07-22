@@ -1,29 +1,21 @@
 name: Update FNO Dashboard Data
 
-on:
+"on":
   schedule:
-    # Every 15 minutes, 7:00 AM - 6:30 PM IST (UTC 1:30 - 13:00)
-    # IST = UTC + 5:30, so 7:00 IST = 1:30 UTC, 18:30 IST = 13:00 UTC
-    - cron: '*/15 1-13 * * 1-5'
-    # Also run at 6:45 AM IST (1:15 UTC) to catch pre-market
-    - cron: '15 1 * * 1-5'
-    # Also run at 6:45 PM IST (13:15 UTC) to catch post-market
-    - cron: '15 13 * * 1-5'
-  
-  workflow_dispatch: {}  # Manual trigger - adds "Run workflow" button
+    # Every 15 minutes, ~08:30–16:29 IST, Monday–Friday.
+    # Cron times are in UTC; IST = UTC + 5:30.
+    - cron: '*/15 3-10 * * 1-5'
+  workflow_dispatch: {}   # adds a "Run workflow" button for manual runs / testing
 
 permissions:
-  contents: write  # needed so this job can commit data/latest.json back to the repo
+  contents: write   # needed so this job can commit data/latest.json back to the repo
 
 jobs:
   update:
     runs-on: ubuntu-latest
-    
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # Ensure we have full history for commits
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -31,32 +23,15 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: |
-          pip install --upgrade pip
-          pip install yfinance pandas numpy requests
-
-      - name: Create data directory
-        run: mkdir -p data
+        run: pip install yfinance pandas numpy
 
       - name: Fetch data and compute indicators
         run: python update_data.py
-        env:
-          ALLOW_OFF_HOURS: "0"  # Set to "1" to bypass market hours check for testing
 
       - name: Commit and push updated data
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # Check if data directory exists
-          if [ -f "data/latest.json" ]; then
-            git add data/latest.json
-            git diff --staged --quiet || {
-              git commit -m "Auto-update dashboard data [skip ci]"
-              git push
-              echo "✅ Committed and pushed data update"
-            }
-          else
-            echo "❌ data/latest.json not found - skipping commit"
-            exit 1
-          fi
+          git add data/latest.json
+          git diff --staged --quiet || git commit -m "Auto-update dashboard data [skip ci]"
+          git push

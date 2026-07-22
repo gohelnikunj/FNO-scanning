@@ -1,37 +1,101 @@
-name: Update FNO Dashboard Data
+"""
+update_data.py
+----------------
+Runs on a schedule via GitHub Actions (see .github/workflows/update_data.yml)
+— on GitHub's own servers, completely independent of anyone having the
+dashboard open in a browser. Fetches fresh OHLCV data from Yahoo Finance for
+every stock in stock_list.py, computes the same indicators the live
+dashboard uses, and writes everything to data/latest.json.
 
-"on":
-  schedule:
-    # Every 15 minutes, ~08:30–16:29 IST, Monday–Friday.
-    # Cron times are in UTC; IST = UTC + 5:30.
-    - cron: '*/15 3-10 * * 1-5'
-  workflow_dispatch: {}   # adds a "Run workflow" button for manual runs / testing
+streamlit_app.py reads that file instead of calling Yahoo Finance itself —
+so the dashboard shows genuinely current data even if nobody has visited
+it in hours, as long as this job has run recently.
 
-permissions:
-  contents: write   # needed so this job can commit data/latest.json back to the repo
+Run manually for testing: python update_data.py
+"""
 
-jobs:
-  update:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
+import json
+import time
+from datetime import datetime, timezone, timedelta
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
+import numpy as np
+import yfinance as yf
 
-      - name: Install dependencies
-        run: pip install yfinance pandas numpy
+import indicators as ind
+from stock_list import STOCKS
 
-      - name: Fetch data and compute indicators
-        run: python update_data.py
+IST = timezone(timedelta(hours=5, minutes=30))
 
-      - name: Commit and push updated data
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/latest.json
-          git diff --staged --quiet || git commit -m "Auto-update dashboard data [skip ci]"
-          git push
+TF_SPECS = {
+    "Day": ("1d", "1y", False),
+    "1H":  ("1h", "1mo", True),
+    "5M":  ("5m", "5d", True),
+}
+
+
+def sanitize(v):
+    """Convert numpy scalars to plain Python types so json.dump can handle them."""
+    if isinstance(v, dict):
+        return {k: sanitize(x) for k, x in v.items()}
+    if isinstance(v, (np.floating,)):
+        return float(v)
+    if isinstance(v, (np.integer,)):
+        return int(v)
+    return v
+
+
+def fetch_one_timeframe(ticker: str, interval: str, period: str):
+    last_err = None
+    for attempt in range(2):
+        try:
+            df = yf.Ticker(ticker).history(period=period, interval=interval)
+            if df is not None and not df.empty:
+                return df, None
+            last_err = "Yahoo returned no data (empty response)"
+        except Exception as e:
+            last_err = f"{type(e).__name__}: {e}"
+        if attempt == 0:
+            time.sleep(1.5)
+    return None, last_err
+
+
+def fetch_and_compute(ticker: str):
+    tech = {}
+    errors = {}
+    ok = True
+    for label, (interval, period, intraday) in TF_SPECS.items():
+        df, err = fetch_one_timeframe(ticker, interval, period)
+        result = ind.batch(df, intraday=intraday) if df is not None else None
+        tech[label] = sanitize(result) if result else None
+        if result is None:
+            ok = False
+            errors[label] = err or "unknown error"
+    return tech, ok, errors
+
+
+def main():
+    started = datetime.now(IST)
+    out = {"generated_at": started.isoformat(), "stocks": {}}
+    failed_count = 0
+
+    for i, s in enumerate(STOCKS):
+        ticker = s["ticker"]
+        tech, ok, errors = fetch_and_compute(ticker)
+        out["stocks"][ticker] = {"tech": tech, "ok": ok, "errors": errors}
+        if not ok:
+            failed_count += 1
+        print(f"[{i+1}/{len(STOCKS)}] {ticker}: {'OK' if ok else 'FAILED — ' + str(errors)}")
+        time.sleep(0.4)  # pacing between stocks to avoid Yahoo rate limits
+
+    out["finished_at"] = datetime.now(IST).isoformat()
+    out["failed_count"] = failed_count
+    out["total_count"] = len(STOCKS)
+
+    with open("data/latest.json", "w") as f:
+        json.dump(out, f, indent=2, allow_nan=True)
+
+    print(f"\nDone. Wrote data/latest.json — {len(STOCKS) - failed_count}/{len(STOCKS)} stocks OK.")
+
+
+if __name__ == "__main__":
+    main()

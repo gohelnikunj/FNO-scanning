@@ -331,8 +331,8 @@ if generated_dt is None:
     st.stop()
 
 age_min = minutes_ago(generated_dt)
-freshness_color = "#2fd88a" if age_min < 20 else ("#d9a63d" if age_min < 60 else "#ff5c6a")
-freshness_note = "" if age_min < 20 else "  — this looks stale; check the Actions tab on GitHub for errors."
+freshness_color = "#2fd88a" if age_min < 30 else ("#d9a63d" if age_min < 180 else "#ff5c6a")
+freshness_note = "" if age_min < 30 else "  — click '🔄 Refresh now' below, or trigger the workflow manually on GitHub if you want current data."
 st.markdown(
     f"<div style='background:#11151d;border:1px solid {freshness_color};border-radius:8px;"
     f"padding:8px 14px;margin-bottom:10px;font-family:\"JetBrains Mono\",monospace;font-size:12.5px;'>"
@@ -344,8 +344,10 @@ st.markdown(
 )
 st.caption(
     "Not investment advice — verify on your broker terminal before trading. "
-    "Data is fetched by a background job on GitHub (see update_data.py), "
-    "independent of whether this page is open."
+    "Data is fetched by a script on GitHub (update_data.py) that you trigger "
+    "manually from the Actions tab whenever you want fresh numbers — the "
+    "dropdown above just controls how often *this page* checks for new "
+    "results, not how often GitHub fetches them."
 )
 
 filter_choice = st.selectbox(
